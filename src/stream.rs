@@ -1,6 +1,4 @@
-use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::hash;
 
 use super::parser::SourcePos;
 
@@ -12,9 +10,12 @@ type SResult<R = (), E = ()> = Result<R, E>;
 /// Note that, while we can look ahead in the stream without consuming any
 /// input, we can't actually rewind the stream.
 pub trait Stream: Iterator {
-    type View: IntoIterator<Item = Self::Item>;
+    type Slice: IntoIterator<Item = Self::Item>;
+
+    fn slice_length(slice: &Self::Slice) -> usize;
 
     fn get_position(&self) -> SourcePos;
+
     fn index(&mut self, n: usize) -> Option<Self::Item>;
 
     /// Obtain a the next element of the struct without actually consuming it.
@@ -24,11 +25,11 @@ pub trait Stream: Iterator {
         self.index(0)
     }
 
-    fn view(&mut self, lower: usize, upper: usize) -> Self::View;
+    fn view(&mut self, lower: usize, upper: usize) -> Self::Slice;
 
     /// Try to look ahead `n` elements without consuming any input. The exact
     /// type of the iterator depends on the implementation.
-    fn lookahead(&mut self, n: usize) -> Self::View {
+    fn lookahead(&mut self, n: usize) -> Self::Slice {
         self.view(0, n)
     }
 
@@ -129,14 +130,17 @@ impl<'c, S> Stream for Conjecture<'c, S>
 where
     S: Stream,
 {
-    type View = S::View;
+    type Slice = S::Slice;
+    fn slice_length(slice: &Self::Slice) -> usize {
+        S::slice_length(slice)
+    }
     fn get_position(&self) -> SourcePos {
         SourcePos(self.position + self.underlying.get_position().0)
     }
     fn index(&mut self, n: usize) -> Option<Self::Item> {
         self.underlying.index(self.position + n)
     }
-    fn view(&mut self, lower: usize, upper: usize) -> Self::View {
+    fn view(&mut self, lower: usize, upper: usize) -> Self::Slice {
         let pos = self.position;
         self.underlying.view(lower + pos, upper + pos)
     }
@@ -187,7 +191,6 @@ where
         }
     }
 }
-
 impl<I> From<I> for CachedIterator<I>
 where
     I: Iterator,
@@ -196,7 +199,6 @@ where
         CachedIterator::new(iterator)
     }
 }
-
 impl<I> Iterator for CachedIterator<I>
 where
     I: Iterator,
@@ -207,24 +209,26 @@ where
             Some(elem) => {
                 self.position += 1;
                 Some(elem)
-            },
+            }
             None => {
                 let result = self.iterator.next();
                 if result.is_some() {
                     self.position += 1;
                 }
                 result
-            },
+            }
         }
     }
 }
-
 impl<I> Stream for CachedIterator<I>
 where
     I: Iterator,
     I::Item: Clone,
 {
-    type View = Vec<Self::Item>;
+    type Slice = Vec<Self::Item>;
+    fn slice_length(slice: &Self::Slice) -> usize {
+        slice.len()
+    }
 
     fn get_position(&self) -> SourcePos {
         SourcePos(self.position)
@@ -234,7 +238,7 @@ where
         self.cache.get(n).cloned()
     }
 
-    fn view<'a>(&mut self, lower: usize, upper: usize) -> Self::View {
+    fn view<'a>(&mut self, lower: usize, upper: usize) -> Self::Slice {
         self.cache(upper);
         let mut view = Vec::with_capacity(upper - lower);
         for i in lower..upper {
@@ -256,8 +260,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::CachedIterator;
-    use super::Stream;
+    use super::*;
+    use crate::parser::SourcePos;
     use std::iter;
 
     /// This is a test to see if we can derive an `Iterator` instance using only
@@ -271,13 +275,17 @@ mod tests {
         }
     }
     impl Stream for TestStream {
-        type View = iter::Empty<()>;
-
+        type Slice = iter::Empty<()>;
+        fn get_position(&self) -> SourcePos {
+            SourcePos(0)
+        }
+        fn slice_length(_slice: &Self::Slice) -> usize {
+            0
+        }
         fn index(&mut self, _n: usize) -> Option<Self::Item> {
             None
         }
-
-        fn view<'a>(&mut self, _lower: usize, _upper: usize) -> Self::View {
+        fn view<'a>(&mut self, _lower: usize, _upper: usize) -> Self::Slice {
             iter::empty()
         }
     }

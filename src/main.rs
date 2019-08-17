@@ -1,6 +1,5 @@
 
-mod parser;
-mod stream;
-use std::marker::PhantomData;
+pub mod parser;
+pub mod stream;
 
 fn main() {}

@@ -1,49 +1,78 @@
+
+use crate::stream;
 use crate::stream::Stream;
-use std::marker::PhantomData;
 use std::cmp::min;
 
-trait Monoid {
-    const ZERO: Self;
+use std::collections::HashSet;
+use std::hash::Hash;
+
+
+pub trait Monoid {
+    fn zero() -> Self;
     fn concat(&mut self, other: Self);
 }
+impl<T: Monoid> Monoid for Option<T> {
+    fn zero() -> Self {
+        None
+    }
+    fn concat(&mut self, other: Self) {
+        match *self {
+            Some(ref mut a) => match other {
+                Some(b) => a.concat(b),
+                _ => (),
+            },
+            _ => match other {
+                Some(_) => *self = other,
+                _ => (),
+            },
+        }
+    }
+}
+impl<T: Hash + Eq> Monoid for HashSet<T> {
+    fn zero() -> Self {
+        HashSet::new()
+    }
+    fn concat(&mut self, mut other: Self) {
+        other.drain().for_each(|elem| {
+            self.insert(elem);
+        })
+    }
+}
 
-trait Parser<T = char, R = (), E = SourcePos, Tok = (), Err = ()>
+pub trait Parser<S, R = (), E = (), D = (), Err = ()>
 where
     Self: Sized,
-    E: ParseError<Tok, Err>,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<R, E>
-    where
-        S: Stream<Item = T>;
+    fn parse(&self, stream: &mut S) -> Result<R, E>;
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.parse(stream).map(|_| ())
     }
 
-    fn label(self, token_description: Tok) -> Label<Self, Tok> {
-        Label::new(self, token_description)
+    fn label(self, token_description: D) -> Label<Self, D> {
+        label(self, token_description)
     }
 
     fn alt<P>(self, other: P) -> Alt<Self, P>
     where
-        P: Parser<T, R, E, Tok, Err>,
+        P: Parser<S, R, E, D, Err>,
     {
         Alt::new(self, other)
     }
 
     fn attempt(self) -> Attempt<Self> {
-        Attempt::new(self)
+        Attempt(self)
     }
-
-    fn many0(self) -> Many0<Self> {
-        Many0::new(self)
+    fn many(self) -> Many0<Self> {
+        Many0(self)
     }
-
     fn many1(self) -> Many1<Self> {
-        Many1::new(self)
+        Many1(self)
+    }
+    fn optional(self) -> Optional<Self> {
+        Optional(self)
     }
 }
 
@@ -62,112 +91,222 @@ trait NDParser<T, R, E>: Sized {
         (parsers, results.count())
     }
 }
-pub enum ErrorItem<Tok> {
-    TokenDescription(Tok),
-    EndOfFile,
+
+fn single_hash<T: Eq + Hash>(elem: T) -> HashSet<T> {
+    let mut set = HashSet::with_capacity(1);
+    set.insert(elem);
+    set
 }
-impl<Tok> ErrorItem<Tok> {
-    pub fn tok(token: Tok) -> Self {
-        ErrorItem::TokenDescription(token)
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ErrItem<T, C, D> {
+    Description(D),
+    Chunk(C),
+    Token(T),
+    Eof,
+}
+impl<T, C, D> Monoid for ErrItem<T, C, D> {
+    fn zero() -> Self {
+        ErrItem::Eof
     }
-    pub fn eof() -> Self {
-        ErrorItem::EndOfFile
+
+    // TODO improve this later.
+    fn concat(&mut self, other: Self) {
+        use ErrItem::{Chunk, Description, Eof, Token};
+        match *self {
+            Description(_) => (),
+            Chunk(_) => match other {
+                Description(_) => *self = other,
+                _ => (),
+            },
+            Token(_) => match other {
+                Description(_) => *self = other,
+                Chunk(_) => *self = other,
+                _ => (),
+            },
+            Eof => match other {
+                Eof => (),
+                _ => *self = other,
+            },
+        }
     }
 }
 
-pub trait ParseError<Tok, Err>: Monoid {
-    fn simple_error (position: SourcePos, unexpected: Option<ErrorItem<Tok>>, expected: Vec<ErrorItem<Tok>>) -> Self;
-    fn fancy_error (position: SourcePos, error: Err) -> Self;
-    fn get_position (&self) -> SourcePos;
+pub trait ParseError<T, C, D, E>: Monoid {
+    fn simple_error(
+        position: SourcePos,
+        unexpected: Option<ErrItem<T, C, D>>,
+        expected: HashSet<ErrItem<T, C, D>>,
+    ) -> Self;
+    fn fancy_error(position: SourcePos, error: E) -> Self;
+    fn get_position(&self) -> SourcePos;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullError<T: Hash + Eq, C: Hash + Eq, D: Hash + Eq, E> {
+    Simple(
+        SourcePos,
+        Option<ErrItem<T, C, D>>,
+        HashSet<ErrItem<T, C, D>>,
+    ),
+    Fancy(SourcePos, E),
+}
+impl<T, C, D, E> Monoid for FullError<T, C, D, E>
+where
+    T: Hash + Eq,
+    C: Hash + Eq,
+    D: Hash + Eq,
+    E: Monoid,
+{
+    fn zero() -> Self {
+        FullError::Simple(SourcePos::zero(), Option::zero(), HashSet::zero())
+    }
+    fn concat(&mut self, other: Self) {
+        use FullError::{Fancy, Simple};
+        if self.get_position() < other.get_position() {
+            return;
+        }
+        if self.get_position() > other.get_position() {
+            *self = other;
+            return;
+        }
+
+        match *self {
+            Fancy(_, ref mut err1) => match other {
+                Fancy(_, err2) => err1.concat(err2),
+                _ => (),
+            },
+            Simple(_, ref mut unexpected1, ref mut expected1) => match other {
+                Fancy(_, _) => *self = other,
+                Simple(_, unexpected2, expected2) => {
+                    unexpected1.concat(unexpected2);
+                    expected1.concat(expected2);
+                }
+            },
+        }
+    }
+}
+impl<T, C, D, E> ParseError<T, C, D, E> for FullError<T, C, D, E>
+where
+    T: Hash + Eq,
+    C: Hash + Eq,
+    D: Hash + Eq,
+    E: Monoid,
+{
+    fn simple_error(
+        position: SourcePos,
+        unexpected: Option<ErrItem<T, C, D>>,
+        expected: HashSet<ErrItem<T, C, D>>,
+    ) -> Self {
+        FullError::Simple(position, unexpected, expected)
+    }
+    fn fancy_error(position: SourcePos, error: E) -> Self {
+        FullError::Fancy(position, error)
+    }
+    fn get_position(&self) -> SourcePos {
+        match *self {
+            FullError::Simple(ref pos, _, _) => pos.clone(),
+            FullError::Fancy(ref pos, _) => pos.clone(),
+        }
+    }
+}
+
+impl Monoid for () {
+    fn zero() -> Self {}
+    fn concat(&mut self, _other: Self) {}
+}
+impl<T, C> ParseError<T, C, (), ()> for () {
+    fn simple_error(
+        _position: SourcePos,
+        _unexpected: Option<ErrItem<T, C, ()>>,
+        _expected: HashSet<ErrItem<T, C, ()>>,
+    ) -> Self {
+    }
+    fn fancy_error(_position: SourcePos, _error: ()) -> Self {}
+    fn get_position(&self) -> SourcePos {
+        SourcePos(0)
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SourcePos(pub usize);
 impl Monoid for SourcePos {
-    const ZERO: SourcePos = SourcePos(0);
+    fn zero() -> Self {
+        SourcePos(0)
+    }
     fn concat(&mut self, other: Self) {
         self.0 = min(self.0, other.0);
     }
 }
-impl<Tok, Err> ParseError<Tok, Err> for SourcePos {
-    fn simple_error (position: SourcePos, _unexpected: Option<ErrorItem<Tok>>, _expected: Vec<ErrorItem<Tok>>) -> Self {
+impl<T, C, D, E> ParseError<T, C, D, E> for SourcePos {
+    fn simple_error(
+        position: SourcePos,
+        _unexpected: Option<ErrItem<T, C, D>>,
+        _expected: HashSet<ErrItem<T, C, D>>,
+    ) -> Self {
         position
     }
-    fn fancy_error (position: SourcePos, _error: Err) -> Self {
+    fn fancy_error(position: SourcePos, _error: E) -> Self {
         position
     }
-    fn get_position (&self) -> SourcePos {
+    fn get_position(&self) -> SourcePos {
         self.clone()
     }
 }
 
 /// A parser which never suceeds
 #[derive(Debug, Clone)]
-struct Failure<Err> {
+pub struct Failure<Err> {
     error: Err,
 }
-impl<Err> Failure<Err> {
-    fn new(error: Err) -> Self {
-        Failure {
-            error: error,
-        }
-    }
+pub fn failure<Err>(error: Err) -> Failure<Err> {
+    Failure { error: error }
 }
-impl<T, R, E, Err, Tok> Parser<T, R, E, Tok, Err> for Failure<Err>
+impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Failure<Err>
 where
-    E: ParseError<Tok, Err>,
     Err: Clone,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<R, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
         Err(E::fancy_error(stream.get_position(), self.error.clone()))
     }
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         Err(E::fancy_error(stream.get_position(), self.error.clone()))
     }
 }
 
 #[derive(Debug, Clone)]
-struct Label<P, Tok> {
+pub struct Label<P, D> {
     parser: P,
-    token_description: Tok,
+    token_description: D,
 }
-impl<P, Tok> Label<P, Tok> {
-    fn new(parser: P, token_description: Tok) -> Self {
-        Label {
-            parser: parser,
-            token_description: token_description,
-        }
+pub fn label<P, D>(parser: P, token_description: D) -> Label<P, D> {
+    Label {
+        parser: parser,
+        token_description: token_description,
     }
 }
-impl<P, T, R, E, Tok, Err> Parser<T, R, E, Tok, Err> for Label<P, Tok>
+impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Label<P, D>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
-    Tok: Clone,
+    P: Parser<S, R, E, D, Err>,
+    S: Stream,
+    S::Item: Eq + Hash,
+    S::Slice: Eq + Hash,
+    D: Eq + Hash + Clone,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<R, E>
-    where
-        S: Stream<Item = T>,
-    {
-        self.parser.parse(stream).map_err(|err| {
-            let item = ErrorItem::tok(self.token_description.clone());
-            err.concat(E::simple_error(SourcePos::ZERO, None, vec![item]));
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
+        self.parser.parse(stream).map_err(|mut err| {
+            let expected = single_hash(ErrItem::Description(self.token_description.clone()));
+            err.concat(E::simple_error(SourcePos::zero(), None, expected));
             err
         })
     }
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
-        self.parser.eat(stream).map_err(|err| {
-            let item = ErrorItem::tok(self.token_description.clone());
-            err.concat(E::simple_error(SourcePos::ZERO, None, vec![item]));
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        self.parser.eat(stream).map_err(|mut err| {
+            let expected = single_hash(ErrItem::Description(self.token_description.clone()));
+            err.concat(E::simple_error(SourcePos::zero(), None, expected));
             err
         })
     }
@@ -176,202 +315,173 @@ where
 
 /// The `Char` parser will try to match a single token of input. It will not
 /// consume it's input if it fails.
-struct Char<T>(T);
-impl<T> Char<T> {
-    fn new(token: T) -> Self {
-        Char(token)
-    }
+pub struct Char<T>(T);
+pub fn single<T>(token: T) -> Char<T> {
+    Char(token)
 }
-impl<T, E, Tok, Err> Parser<T, T, E, Tok, Err> for Char<T>
+impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Char<R>
 where
-    Tok: From<T>,
-    E: ParseError<Tok, Err>,
-    T: PartialEq + Clone + std::fmt::Debug,
+    S: Stream<Item = R>,
+    S::Slice: Eq + Hash,
+    R: Eq + Hash + Clone,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+    D: Eq + Hash,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<T, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
         if let Some(token) = stream.peek() {
             if token == self.0 {
                 stream.advance();
                 Ok(token.clone())
-            }
-            else {
+            } else {
                 let pos = stream.get_position();
-                let unexpected = Some(ErrorItem::tok(Tok::from(token.clone())));
-                let expected = vec![ErrorItem::tok(Tok::from(self.0.clone()))];
-                let error = E::simple_error(pos, unexpected, expected);
-                Err(error)
+                let unexpected = Some(ErrItem::Token(token.clone()));
+                let expected = single_hash(ErrItem::Token(self.0.clone()));
+                Err(E::simple_error(pos, unexpected, expected))
             }
-        }
-        else {
+        } else {
             let pos = stream.get_position();
-            let unexpected = Some(ErrorItem::eof());
-            let expected = vec![ErrorItem::tok(Tok::from(self.0.clone()))];
-            let error = E::simple_error(pos, unexpected, expected);
-            Err(error)
+            let unexpected = Some(ErrItem::Eof);
+            let expected = single_hash(ErrItem::Token(self.0.clone()));
+            Err(E::simple_error(pos, unexpected, expected))
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         if let Some(token) = stream.peek() {
             if token == self.0 {
                 stream.advance();
                 Ok(())
-            }
-            else {
+            } else {
                 let pos = stream.get_position();
-                let unexpected = Some(ErrorItem::tok(Tok::from(token.clone())));
-                let expected = vec![ErrorItem::tok(Tok::from(self.0.clone()))];
-                let error = E::simple_error(pos, unexpected, expected);
-                Err(error)
+                let unexpected = Some(ErrItem::Token(token.clone()));
+                let expected = single_hash(ErrItem::Token(self.0.clone()));
+                Err(E::simple_error(pos, unexpected, expected))
             }
-        }
-        else {
+        } else {
             let pos = stream.get_position();
-            let unexpected = Some(ErrorItem::eof());
-            let expected = vec![ErrorItem::tok(Tok::from(self.0.clone()))];
-            let error = E::simple_error(pos, unexpected, expected);
-            Err(error)
+            let unexpected = Some(ErrItem::Eof);
+            let expected = single_hash(ErrItem::Token(self.0.clone()));
+            Err(E::simple_error(pos, unexpected, expected))
         }
     }
 }
 
-struct Chunk<C>(C);
-impl<T, C, E, Tok, Err> Parser<T, C, E, Tok, Err> for Chunk<C>
+/// Parse a "chunk" of input. As this is a basic parser, it will not consume any
+/// of the stream if it fails.
+pub struct Chunk<C>(C);
+pub fn chunk<C>(chunk: C) -> Chunk<C> {
+    Chunk(chunk)
+}
+impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Chunk<R>
 where
-    E: ParseError<Tok, Err>,
-    T: PartialEq,
-    C: IntoIterator<Item = T> + Clone,
+    S: Stream<Slice = R>,
+    S::Item: Eq + Hash,
+    R: IntoIterator<Item = S::Item> + Clone + Eq + Hash + PartialEq,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+    D: Eq + Hash,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<C, E>
-    where
-        S: Stream<Item = T>,
-    {
-        let mut chunk = self.0.clone().into_iter();
-        loop {
-            if let Some(chunk_char) = chunk.next() {
-                if let Some(stream_char) = stream.next() {
-                    if stream_char != chunk_char {
-                        return Err(());
-                    }
-                } else {
-                    return Err(());
-                }
-            } else {
-                return Ok(self.0.clone());
-            }
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
+        let len = S::slice_length(&self.0);
+        let input = stream.lookahead(len);
+        let pos = stream.get_position();
+        if self.0 == input {
+            stream.seek(len);
+            Ok(input)
+        } else {
+            let unexpected = Some(ErrItem::Chunk(input));
+            let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+            Err(E::simple_error(pos, unexpected, expected))
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
-        let mut chunk = self.0.clone().into_iter();
-        loop {
-            if let Some(chunk_char) = chunk.next() {
-                if let Some(stream_char) = stream.next() {
-                    if stream_char != chunk_char {
-                        return Err(());
-                    }
-                } else {
-                    return Err(());
-                }
-            } else {
-                return Ok(());
-            }
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        let len = S::slice_length(&self.0);
+        let input = stream.lookahead(len);
+        if self.0 == input {
+            stream.seek(len);
+            Ok(())
+        } else {
+            let pos = stream.get_position();
+            let unexpected = Some(ErrItem::Chunk(input));
+            let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+            Err(E::simple_error(pos, unexpected, expected))
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct Alt<P, Q> {
+pub struct Alt<P, Q> {
     first: P,
     second: Q,
 }
 impl<P, Q> Alt<P, Q> {
-    fn new(first: P, second: Q) -> Self {
+    pub fn new(first: P, second: Q) -> Self {
         Alt {
             first: first,
             second: second,
         }
     }
 }
-impl<P, Q, T, R, E, Tok, Err> Parser<T, R, E, Tok, Err> for Alt<P, Q>
+impl<P, Q, S, R, E, D, Err> Parser<S, R, E, D, Err> for Alt<P, Q>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    Q: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
+    P: Parser<S, R, E, D, Err>,
+    Q: Parser<S, R, E, D, Err>,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<R, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
         match self.first.parse(stream) {
-            Ok(result) => Ok(result),
-            Err(_) => self.second.parse(stream),
+            Ok(result1) => Ok(result1),
+            Err(mut e1) => match self.second.parse(stream) {
+                Ok(result2) => Ok(result2),
+                Err(e2) => {
+                    e1.concat(e2);
+                    Err(e1)
+                }
+            },
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
-        match self.first.parse(stream) {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        match self.first.eat(stream) {
             Ok(_) => Ok(()),
-            Err(_) => self.second.parse(stream).map(|_| ()),
+            Err(mut e1) => match self.second.eat(stream) {
+                Ok(_) => Ok(()),
+                Err(e2) => {
+                    e1.concat(e2);
+                    Err(e1)
+                }
+            },
         }
     }
 }
 
 /// An `Attempt` will try to apply a parser to a strem. If it succeeds, it will
 /// consume input, if it fails, it will pretend that it consumed no imput.
-struct Attempt<P>(P);
-impl<P> Attempt<P> {
-    fn new(parser: P) -> Self {
-        Attempt(parser)
-    }
-}
-impl<P, T, R, E, Tok, Err> Parser<T, R, E, Tok, Err> for Attempt<P>
+pub struct Attempt<P>(P);
+impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Attempt<P>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
+    S: Stream,
+    P: for<'a> Parser<stream::Conjecture<'a, S>, R, E, D, Err>,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<R, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
         stream.conjecture(|conj| self.0.parse(conj))
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         stream.conjecture(|conj| self.0.eat(conj))
     }
 }
 
-struct Many0<P>(P);
-impl<P> Many0<P> {
-    fn new(parser: P) -> Self {
-        Many0(parser)
-    }
-}
-impl<P, T, R, E, Tok, Err> Parser<T, Vec<R>, E, Tok, Err> for Many0<P>
+pub struct Many0<P>(P);
+impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many0<P>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
+    P: Parser<S, R, E, D, Err>,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<Vec<R>, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<Vec<R>, E> {
         let mut results = Vec::new();
         loop {
             match self.0.parse(stream) {
@@ -381,10 +491,7 @@ where
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         loop {
             match self.0.parse(stream) {
                 Ok(_) => (),
@@ -394,21 +501,14 @@ where
     }
 }
 
-struct Many1<P>(P);
-impl<P> Many1<P> {
-    fn new(parser: P) -> Self {
-        Many1(parser)
-    }
-}
-impl<P, T, R, E, Tok, Err> Parser<T, Vec<R>, E, Tok, Err> for Many1<P>
+pub struct Many1<P>(P);
+impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many1<P>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
+    P: Parser<S, R, E, D, Err>,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<Vec<R>, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<Vec<R>, E> {
         let mut results = vec![self.0.parse(stream)?];
         loop {
             match self.0.parse(stream) {
@@ -418,10 +518,7 @@ where
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.0.parse(stream)?;
         loop {
             match self.0.parse(stream) {
@@ -432,31 +529,21 @@ where
     }
 }
 
-struct Optional<P>(P);
-impl<P> Optional<P> {
-    fn new(parser: P) -> Self {
-        Optional(parser)
-    }
-}
-impl<P, T, R, E, Tok, Err> Parser<T, Option<R>, E, Tok, Err> for Optional<P>
+pub struct Optional<P>(P);
+impl<P, S, R, E, D, Err> Parser<S, Option<R>, E, D, Err> for Optional<P>
 where
-    P: Parser<T, R, E, Tok, Err>,
-    E: ParseError<Tok, Err>,
+    P: Parser<S, R, E, D, Err>,
+    S: Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse<S>(&self, stream: &mut S) -> Result<Option<R>, E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn parse(&self, stream: &mut S) -> Result<Option<R>, E> {
         match self.0.parse(stream) {
             Ok(result) => Ok(Some(result)),
             Err(_) => Ok(None),
         }
     }
 
-    fn eat<S>(&self, stream: &mut S) -> Result<(), E>
-    where
-        S: Stream<Item = T>,
-    {
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
         match self.0.eat(stream) {
             Ok(_) => Ok(()),
             Err(_) => Ok(()),
@@ -467,14 +554,12 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::Char;
-    use super::Chunk;
-    use super::Parser;
+    use super::*;
     use crate::stream::{CachedIterator, Stream};
 
     #[test]
     fn char_parses() {
-        let parser = Char::new('H');
+        let parser = single('H');
 
         let mut string1 = CachedIterator::from("Fello, World!".chars());
         let mut string2 = CachedIterator::from("Hello, World!".chars());
@@ -482,38 +567,46 @@ mod test {
         assert_eq!(parser.parse(&mut string1), Err(()));
         assert_eq!(string1.remove(2), vec!['F', 'e']);
 
-        assert_eq!(parser.parse(&mut string2), Ok('H'));
+        let result: Result<char, ()> = Ok('H');
+        assert_eq!(parser.parse(&mut string2), result);
         assert_eq!(string2.remove(2), vec!['e', 'l']);
     }
 
     #[test]
     fn label_modifies_error() {
-        let char_parser = Char::new('H').label("failed with message");
-        let chunk_parser = Chunk("Hello".chars()).label("failed again");
+        let char_parser = label(single('H'), "failed with message");
+        let chunk_parser = label(chunk("Hello".chars().collect()), "failed again");
 
         let mut string1 = CachedIterator::from("Fello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
-        assert_eq!(char_parser.parse(&mut string1), Err("failed with message"));
+        let result: Result<char, FullError<_, _, _, ()>> = Err(FullError::Simple(
+            SourcePos::zero(),
+            Some(ErrItem::Token('F')),
+            std::iter::once(ErrItem::Description("failed with message")).collect(),
+        ));
+        assert_eq!(char_parser.parse(&mut string1), result);
         assert_eq!(string1.remove(2), vec!['F', 'e']);
 
-        assert_eq!(
-            chunk_parser.parse(&mut string2).unwrap_err(),
-            "failed again"
-        );
+        let result: Result<_, FullError<_, _, _, ()>> = Err(FullError::Simple(
+            SourcePos::zero(),
+            Some(ErrItem::Token('F')),
+            std::iter::once(ErrItem::Description("failed again")).collect(),
+        ));
+        assert_eq!(chunk_parser.parse(&mut string2), result);
         assert_eq!(string2.remove(3), vec!['f', 'o', ',']);
     }
 
     #[test]
     fn chunk_parses() {
-        let parser = Chunk("Hello".chars());
+        let parser = chunk("Hello".chars().collect());
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
         let result = parser.parse(&mut string1);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().collect::<String>(), "Hello");
+        assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
 
         let result = parser.parse(&mut string2);
@@ -523,7 +616,7 @@ mod test {
 
     #[test]
     fn attempt_parses() {
-        let parser = Chunk("Hello".chars()).attempt();
+        let parser = chunk("Hello".chars().collect()).attempt();
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
@@ -534,23 +627,25 @@ mod test {
 
         let result = parser.parse(&mut string1);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().collect::<String>(), "Hello");
+        assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
     }
 
     #[test]
     fn alt_parses() {
-        let parser = Chunk("Hello".chars()).attempt().alt(Chunk("Heffo".chars()));
+        let parser = Chunk("Hello".chars().collect())
+            .attempt()
+            .alt(Chunk("Heffo".chars().collect()));
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
         let result = parser.parse(&mut string1);
-        assert_eq!(result.unwrap().collect::<String>(), "Hello");
+        assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
 
         let result = parser.parse(&mut string2);
-        assert_eq!(result.unwrap().collect::<String>(), "Heffo");
+        assert_eq!(result.unwrap().into_iter().collect::<String>(), "Heffo");
         assert_eq!(string2.remove(3), vec![',', ' ', 'W']);
     }
 }
