@@ -46,9 +46,15 @@ where
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
     fn parse(&self, stream: &mut S) -> Result<R, E>;
+    fn parse_qualified(&self, stream: &mut S, _err: &E) -> Result<R, E> {
+        self.parse(stream)
+    }
 
     fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.parse(stream).map(|_| ())
+    }
+    fn eat_qualified(&self, stream: &mut S, _err: &E) -> Result<(), E> {
+        self.eat(stream)
     }
 
     fn label(self, token_description: D) -> Label<Self, D> {
@@ -58,20 +64,33 @@ where
     fn alt<P>(self, other: P) -> Alt<Self, P>
     where
         P: Parser<S, R, E, D, Err>,
+        Alt<Self, P>: Parser<S, R, E, D, Err>,
     {
-        Alt::new(self, other)
+        alt(self, other)
     }
 
-    fn attempt(self) -> Attempt<Self> {
+    fn attempt(self) -> Attempt<Self>
+    where
+        Attempt<Self>: Parser<S, R, E, D, Err>,
+    {
         Attempt(self)
     }
-    fn many(self) -> Many0<Self> {
+    fn many(self) -> Many0<Self>
+    where
+        Many0<Self>: Parser<S, Vec<R>, E, D, Err>,
+    {
         Many0(self)
     }
-    fn many1(self) -> Many1<Self> {
+    fn many1(self) -> Many1<Self>
+    where
+        Many0<Self>: Parser<S, Vec<R>, E, D, Err>,
+    {
         Many1(self)
     }
-    fn optional(self) -> Optional<Self> {
+    fn optional(self) -> Optional<Self>
+    where
+        Optional<Self>: Parser<S, Option<R>, E, D, Err>,
+    {
         Optional(self)
     }
 }
@@ -138,6 +157,7 @@ pub trait ParseError<T, C, D, E>: Monoid {
         unexpected: Option<ErrItem<T, C, D>>,
         expected: HashSet<ErrItem<T, C, D>>,
     ) -> Self;
+    fn label(&mut self, label: D);
     fn fancy_error(position: SourcePos, error: E) -> Self;
     fn get_position(&self) -> SourcePos;
 }
@@ -200,6 +220,14 @@ where
     ) -> Self {
         FullError::Simple(position, unexpected, expected)
     }
+    fn label(&mut self, label: D) {
+        match *self {
+            FullError::Simple(_, _, ref mut expected) => {
+                *expected = single_hash(ErrItem::Description(label));
+            }
+            FullError::Fancy(_, _) => (),
+        }
+    }
     fn fancy_error(position: SourcePos, error: E) -> Self {
         FullError::Fancy(position, error)
     }
@@ -222,6 +250,7 @@ impl<T, C> ParseError<T, C, (), ()> for () {
         _expected: HashSet<ErrItem<T, C, ()>>,
     ) -> Self {
     }
+    fn label(&mut self, _label: ()) {}
     fn fancy_error(_position: SourcePos, _error: ()) -> Self {}
     fn get_position(&self) -> SourcePos {
         SourcePos(0)
@@ -238,15 +267,16 @@ impl Monoid for SourcePos {
         self.0 = min(self.0, other.0);
     }
 }
-impl<T, C, D, E> ParseError<T, C, D, E> for SourcePos {
+impl<T, C> ParseError<T, C, (), ()> for SourcePos {
     fn simple_error(
         position: SourcePos,
-        _unexpected: Option<ErrItem<T, C, D>>,
-        _expected: HashSet<ErrItem<T, C, D>>,
+        _unexpected: Option<ErrItem<T, C, ()>>,
+        _expected: HashSet<ErrItem<T, C, ()>>,
     ) -> Self {
         position
     }
-    fn fancy_error(position: SourcePos, _error: E) -> Self {
+    fn label(&mut self, _label: ()) {}
+    fn fancy_error(position: SourcePos, _error: ()) -> Self {
         position
     }
     fn get_position(&self) -> SourcePos {
@@ -298,15 +328,13 @@ where
 {
     fn parse(&self, stream: &mut S) -> Result<R, E> {
         self.parser.parse(stream).map_err(|mut err| {
-            let expected = single_hash(ErrItem::Description(self.token_description.clone()));
-            err.concat(E::simple_error(SourcePos::zero(), None, expected));
+            err.label(self.token_description.clone());
             err
         })
     }
     fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.parser.eat(stream).map_err(|mut err| {
-            let expected = single_hash(ErrItem::Description(self.token_description.clone()));
-            err.concat(E::simple_error(SourcePos::zero(), None, expected));
+            err.label(self.token_description.clone());
             err
         })
     }
@@ -414,12 +442,10 @@ pub struct Alt<P, Q> {
     first: P,
     second: Q,
 }
-impl<P, Q> Alt<P, Q> {
-    pub fn new(first: P, second: Q) -> Self {
-        Alt {
-            first: first,
-            second: second,
-        }
+pub fn alt<P, Q>(first: P, second: Q) -> Alt<P, Q> {
+    Alt {
+        first: first,
+        second: second,
     }
 }
 impl<P, Q, S, R, E, D, Err> Parser<S, R, E, D, Err> for Alt<P, Q>
@@ -459,6 +485,9 @@ where
 /// An `Attempt` will try to apply a parser to a strem. If it succeeds, it will
 /// consume input, if it fails, it will pretend that it consumed no imput.
 pub struct Attempt<P>(P);
+pub fn attempt<P>(parser: P) -> Attempt<P> {
+    Attempt(parser)
+}
 impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Attempt<P>
 where
     S: Stream,
@@ -590,11 +619,11 @@ mod test {
 
         let result: Result<_, FullError<_, _, _, ()>> = Err(FullError::Simple(
             SourcePos::zero(),
-            Some(ErrItem::Token('F')),
+            Some(ErrItem::Chunk(vec!['H', 'e', 'f', 'f', 'o'])),
             std::iter::once(ErrItem::Description("failed again")).collect(),
         ));
         assert_eq!(chunk_parser.parse(&mut string2), result);
-        assert_eq!(string2.remove(3), vec!['f', 'o', ',']);
+        assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
     }
 
     #[test]
@@ -604,28 +633,28 @@ mod test {
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
-        let result = parser.parse(&mut string1);
+        let result: Result<_, ()> = parser.parse(&mut string1);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
 
-        let result = parser.parse(&mut string2);
+        let result: Result<_, ()> = parser.parse(&mut string2);
         assert!(result.is_err());
-        assert_eq!(string2.remove(3), vec!['f', 'o', ',']);
+        assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
     }
 
     #[test]
     fn attempt_parses() {
-        let parser = chunk("Hello".chars().collect()).attempt();
+        let parser = attempt(chunk("Hello".chars().collect()));
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
-        let result = parser.parse(&mut string2);
+        let result: Result<_, ()> = parser.parse(&mut string2);
         assert!(result.is_err());
         assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
 
-        let result = parser.parse(&mut string1);
+        let result: Result<_, ()> = parser.parse(&mut string1);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
@@ -633,18 +662,19 @@ mod test {
 
     #[test]
     fn alt_parses() {
-        let parser = Chunk("Hello".chars().collect())
-            .attempt()
-            .alt(Chunk("Heffo".chars().collect()));
+        let parser = alt(
+            attempt(chunk("Hello".chars().collect())),
+            chunk("Heffo".chars().collect()),
+        );
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
 
-        let result = parser.parse(&mut string1);
+        let result: Result<_, ()> = parser.parse(&mut string1);
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
 
-        let result = parser.parse(&mut string2);
+        let result: Result<_, ()> = parser.parse(&mut string2);
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Heffo");
         assert_eq!(string2.remove(3), vec![',', ' ', 'W']);
     }
