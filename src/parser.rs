@@ -1,11 +1,12 @@
 
 use crate::stream;
-use crate::stream::Stream;
+use crate::stream::{Chars, Stream};
 use std::cmp::min;
 
 use std::collections::HashSet;
 use std::hash::Hash;
 
+type PResult<R = (), E = ()> = Result<R, E>;
 
 pub trait Monoid {
     fn zero() -> Self;
@@ -46,14 +47,14 @@ where
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
     fn parse(&self, stream: &mut S) -> Result<R, E>;
-    fn parse_qualified(&self, stream: &mut S, _err: &E) -> Result<R, E> {
+    fn parse_qualified(&self, stream: &mut S, _err: &E) -> PResult<R, E> {
         self.parse(stream)
     }
 
     fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.parse(stream).map(|_| ())
     }
-    fn eat_qualified(&self, stream: &mut S, _err: &E) -> Result<(), E> {
+    fn eat_qualified(&self, stream: &mut S, _err: &E) -> PResult<(), E> {
         self.eat(stream)
     }
 
@@ -257,7 +258,7 @@ impl<T, C> ParseError<T, C, (), ()> for () {
     }
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SourcePos(pub usize);
 impl Monoid for SourcePos {
     fn zero() -> Self {
@@ -404,36 +405,52 @@ impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Chunk<R>
 where
     S: Stream<Slice = R>,
     S::Item: Eq + Hash,
-    R: IntoIterator<Item = S::Item> + Clone + Eq + Hash + PartialEq,
+    R: Clone + Eq + Hash + PartialEq + stream::SliceLen,
     E: ParseError<S::Item, S::Slice, D, Err>,
     D: Eq + Hash,
 {
     fn parse(&self, stream: &mut S) -> Result<R, E> {
-        let len = S::slice_length(&self.0);
-        let input = stream.lookahead(len);
+        let len = self.0.length();
         let pos = stream.get_position();
-        if self.0 == input {
-            stream.seek(len);
-            Ok(input)
-        } else {
-            let unexpected = Some(ErrItem::Chunk(input));
-            let expected = single_hash(ErrItem::Chunk(self.0.clone()));
-            Err(E::simple_error(pos, unexpected, expected))
-        }
+        stream.lookahead(len).map_or_else(
+            || {
+                let unexpected = Some(ErrItem::Eof);
+                let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+                Err(E::simple_error(pos, unexpected, expected))
+            },
+            |input| {
+                if self.0 == input {
+                    stream.seek(len);
+                    Ok(input)
+                } else {
+                    let unexpected = Some(ErrItem::Chunk(input));
+                    let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+                    Err(E::simple_error(pos, unexpected, expected))
+                }
+            },
+        )
     }
 
     fn eat(&self, stream: &mut S) -> Result<(), E> {
-        let len = S::slice_length(&self.0);
-        let input = stream.lookahead(len);
-        if self.0 == input {
-            stream.seek(len);
-            Ok(())
-        } else {
-            let pos = stream.get_position();
-            let unexpected = Some(ErrItem::Chunk(input));
-            let expected = single_hash(ErrItem::Chunk(self.0.clone()));
-            Err(E::simple_error(pos, unexpected, expected))
-        }
+        let len = self.0.length();
+        let pos = stream.get_position();
+        stream.lookahead(len).map_or_else(
+            || {
+                let unexpected = Some(ErrItem::Eof);
+                let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+                Err(E::simple_error(pos, unexpected, expected))
+            },
+            |input| {
+                if self.0 == input {
+                    stream.seek(len);
+                    Ok(())
+                } else {
+                    let unexpected = Some(ErrItem::Chunk(input));
+                    let expected = single_hash(ErrItem::Chunk(self.0.clone()));
+                    Err(E::simple_error(pos, unexpected, expected))
+                }
+            },
+        )
     }
 }
 
@@ -636,6 +653,23 @@ mod test {
         let result: Result<_, ()> = parser.parse(&mut string1);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Hello");
+        assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
+
+        let result: Result<_, ()> = parser.parse(&mut string2);
+        assert!(result.is_err());
+        assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
+    }
+
+    #[test]
+    fn chunk_parses_str() {
+        let parser = chunk("Hello");
+
+        let mut string1 = Chars::new("Hello, World!");
+        let mut string2 = Chars::new("Heffo, World!");
+
+        let result: Result<_, ()> = parser.parse(&mut string1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello");
         assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
 
         let result: Result<_, ()> = parser.parse(&mut string2);
