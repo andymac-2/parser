@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use super::parser::SourcePos;
+use super::error::SourcePos;
 
 type SResult<R = (), E = ()> = Result<R, E>;
 
@@ -271,11 +271,15 @@ where
     }
 }
 
+/// A slice (`&[T]`) represents a stream of `&T`. The `Slice` object is a
+/// wrapper around a slice which also keeps track of the position within the
+/// source file.
 pub struct Slice<'a, T> {
     position: usize,
     slice: std::slice::Iter<'a, T>,
 }
 impl<'a, T> Slice<'a, T> {
+    /// create a new `Slice` from a `&[T]`.
     pub fn new(slice: &'a [T]) -> Self {
         Slice {
             position: 0,
@@ -314,11 +318,15 @@ impl<'a, T> Stream for Slice<'a, T> {
         }
     }
 }
+
+/// A wrapper around &str which represents a stream of `char`. `Chars` also
+/// keeps track of it's position within the source file.
 pub struct Chars<'a> {
     position: usize,
     string: std::str::Chars<'a>,
 }
 impl<'a> Chars<'a> {
+    /// Creates a new `Chars` from an &str.
     pub fn new(string: &'a str) -> Self {
         Chars {
             position: 0,
@@ -381,7 +389,7 @@ impl<'a> Stream for Chars<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::SourcePos;
+    use crate::parser::error::SourcePos;
     use std::iter;
 
     /// This is a test to see if we can derive an `Iterator` instance using only
