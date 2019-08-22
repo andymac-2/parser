@@ -1,10 +1,13 @@
+
+pub mod alternate;
 pub mod error;
+pub mod sequence;
 pub mod stream;
 
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use error::{ParseError, ErrItem};
+use error::{ErrItem, ParseError};
 
 type PResult<R = (), E = ()> = Result<R, E>;
 
@@ -65,7 +68,6 @@ where
     fn alt<P>(self, other: P) -> Alt<Self, P>
     where
         P: Parser<S, R, E, D, Err>,
-        Alt<Self, P>: Parser<S, R, E, D, Err>,
     {
         alt(self, other)
     }
@@ -354,6 +356,9 @@ where
 }
 
 pub struct Many0<P>(P);
+pub fn many0<P>(parser: P) -> Many0<P> {
+    Many0(parser)
+}
 impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many0<P>
 where
     P: Parser<S, R, E, D, Err>,
@@ -434,7 +439,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use error::{SourcePos, FullError};
+    use error::{FullError, SourcePos};
     use stream::{CachedIterator, Chars, Stream};
 
     #[test]
@@ -545,5 +550,38 @@ mod test {
         let result: Result<_, ()> = parser.parse(&mut string2);
         assert_eq!(result.unwrap().into_iter().collect::<String>(), "Heffo");
         assert_eq!(string2.remove(3), vec![',', ' ', 'W']);
+    }
+
+
+    #[test]
+    fn simple_grammar() {
+        let ws_char = alt(alt(single(' '), single('\t')), single('\n'));
+
+        let ws = many0(ws_char);
+
+        let digit = single('0')
+            .alt(single('1'))
+            .alt(single('2'))
+            .alt(single('3'))
+            .alt(single('4'))
+            .alt(single('5'))
+            .alt(single('6'))
+            .alt(single('7'))
+            .alt(single('8'))
+            .alt(single('9'));
+
+        let sexp = (single('('), ws, digit, ws, single(')'));
+
+        let mut string1 = Chars::new("(     5    \t  )");
+        let mut string2 = Chars::new("Heffo, World!");
+
+        let result: Result<_, ()> = sexp.parse(&mut string1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ('(', vec![], '5', vec![], ')'));
+        assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
+
+        let result: Result<_, ()> = sexp.parse(&mut string2);
+        assert!(result.is_err());
+        assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
     }
 }
