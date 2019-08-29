@@ -3,7 +3,7 @@ use std::hash::Hash;
 
 use super::Monoid;
 
-pub trait ParseError<T, C, D, E>: Monoid {
+pub trait ParseError<T, C, D = (), E = ()>: Monoid {
     fn simple_error(
         position: SourcePos,
         unexpected: Option<ErrItem<T, C, D>>,

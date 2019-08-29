@@ -7,6 +7,7 @@ pub mod stream;
 use std::collections::HashSet;
 use std::hash::Hash;
 
+pub use alternate::Alt;
 use error::{ErrItem, ParseError};
 
 type PResult<R = (), E = ()> = Result<R, E>;
@@ -59,42 +60,6 @@ where
     }
     fn eat_qualified(&self, stream: &mut S, _err: &E) -> PResult<(), E> {
         self.eat(stream)
-    }
-
-    fn label(self, token_description: D) -> Label<Self, D> {
-        label(self, token_description)
-    }
-
-    fn alt<P>(self, other: P) -> Alt<Self, P>
-    where
-        P: Parser<S, R, E, D, Err>,
-    {
-        alt(self, other)
-    }
-
-    fn attempt(self) -> Attempt<Self>
-    where
-        Attempt<Self>: Parser<S, R, E, D, Err>,
-    {
-        Attempt(self)
-    }
-    fn many(self) -> Many0<Self>
-    where
-        Many0<Self>: Parser<S, Vec<R>, E, D, Err>,
-    {
-        Many0(self)
-    }
-    fn many1(self) -> Many1<Self>
-    where
-        Many0<Self>: Parser<S, Vec<R>, E, D, Err>,
-    {
-        Many1(self)
-    }
-    fn optional(self) -> Optional<Self>
-    where
-        Optional<Self>: Parser<S, Option<R>, E, D, Err>,
-    {
-        Optional(self)
     }
 }
 
@@ -179,6 +144,7 @@ where
 
 /// The `Char` parser will try to match a single token of input. It will not
 /// consume it's input if it fails.
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Char<T>(T);
 pub fn single<T>(token: T) -> Char<T> {
     Char(token)
@@ -289,53 +255,9 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Alt<P, Q> {
-    first: P,
-    second: Q,
-}
-pub fn alt<P, Q>(first: P, second: Q) -> Alt<P, Q> {
-    Alt {
-        first: first,
-        second: second,
-    }
-}
-impl<P, Q, S, R, E, D, Err> Parser<S, R, E, D, Err> for Alt<P, Q>
-where
-    P: Parser<S, R, E, D, Err>,
-    Q: Parser<S, R, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
-        match self.first.parse(stream) {
-            Ok(result1) => Ok(result1),
-            Err(mut e1) => match self.second.parse(stream) {
-                Ok(result2) => Ok(result2),
-                Err(e2) => {
-                    e1.concat(e2);
-                    Err(e1)
-                }
-            },
-        }
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        match self.first.eat(stream) {
-            Ok(_) => Ok(()),
-            Err(mut e1) => match self.second.eat(stream) {
-                Ok(_) => Ok(()),
-                Err(e2) => {
-                    e1.concat(e2);
-                    Err(e1)
-                }
-            },
-        }
-    }
-}
-
 /// An `Attempt` will try to apply a parser to a strem. If it succeeds, it will
 /// consume input, if it fails, it will pretend that it consumed no imput.
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Attempt<P>(P);
 pub fn attempt<P>(parser: P) -> Attempt<P> {
     Attempt(parser)
@@ -355,8 +277,12 @@ where
     }
 }
 
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Many0<P>(P);
 pub fn many0<P>(parser: P) -> Many0<P> {
+    Many0(parser)
+}
+pub fn many<P>(parser: P) -> Many0<P> {
     Many0(parser)
 }
 impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many0<P>
@@ -385,6 +311,7 @@ where
     }
 }
 
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Many1<P>(P);
 impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many1<P>
 where
@@ -413,6 +340,7 @@ where
     }
 }
 
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Optional<P>(P);
 impl<P, S, R, E, D, Err> Parser<S, Option<R>, E, D, Err> for Optional<P>
 where
@@ -435,6 +363,162 @@ where
     }
 }
 
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
+pub struct Void<P, R> {
+    parser: P,
+    _result: std::marker::PhantomData<*const R>,
+}
+pub fn void<P, R>(parser: P) -> Void<P, R> {
+    Void {
+        parser: parser,
+        _result: std::marker::PhantomData,
+    }
+}
+impl<P, S, R, E, D, Err> Parser<S, (), E, D, Err> for Void<P, R>
+where
+    P: Parser<S, R, E, D, Err>,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<(), E> {
+        self.parser.eat(stream)
+    }
+
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        self.parser.eat(stream)
+    }
+}
+
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
+pub struct First<P0, P1, R1> {
+    first: P0,
+    second: P1,
+    _second_result: std::marker::PhantomData<*const R1>,
+}
+pub fn first<P0, P1, R1>(first: P0, second: P1) -> First<P0, P1, R1> {
+    First {
+        first: first,
+        second: second,
+        _second_result: std::marker::PhantomData,
+    }
+}
+impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, R0, E, D, Err> for First<P0, P1, R1>
+where
+    P0: Parser<S, R0, E, D, Err>,
+    P1: Parser<S, R1, E, D, Err>,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<R0, E> {
+        let result = self.first.parse(stream)?;
+        self.second.eat(stream)?;
+        Ok(result)
+    }
+
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        self.first.eat(stream)?;
+        self.second.eat(stream)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
+pub struct Second<P0, P1, R0> {
+    first: P0,
+    second: P1,
+    _first_result: std::marker::PhantomData<*const R0>,
+}
+pub fn second<P0, P1, R0>(first: P0, second: P1) -> Second<P0, P1, R0> {
+    Second {
+        first: first,
+        second: second,
+        _first_result: std::marker::PhantomData,
+    }
+}
+impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, R1, E, D, Err> for Second<P0, P1, R0>
+where
+    P0: Parser<S, R0, E, D, Err>,
+    P1: Parser<S, R1, E, D, Err>,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<R1, E> {
+        self.first.eat(stream)?;
+        self.second.parse(stream)
+    }
+
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        self.first.eat(stream)?;
+        self.second.eat(stream)?;
+        Ok(())
+    }
+}
+
+impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for fn(&mut S) -> Result<R, E>
+where
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
+        self(stream)
+    }
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        match self(stream) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
+pub struct SepBy<P0, P1, R> {
+    parser: P0,
+    delimiter: P1,
+    _delimiter_result: std::marker::PhantomData<*const R>,
+}
+pub fn sep_by<P0, P1, R>(parser: P0, delimiter: P1) -> SepBy<P0, P1, R> {
+    SepBy {
+        parser: parser,
+        delimiter: delimiter,
+        _delimiter_result: std::marker::PhantomData,
+    }
+}
+impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, Vec<R0>, E, D, Err> for SepBy<P0, P1, R1>
+where
+    P0: Parser<S, R0, E, D, Err>,
+    P1: Parser<S, R1, E, D, Err>,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<Vec<R0>, E> {
+        let mut results = Vec::new();
+        loop {
+            match self.parser.parse(stream) {
+                Ok(result) => results.push(result),
+                Err(_) => return Ok(results),
+            };
+
+            match self.delimiter.eat(stream) {
+                Ok(_) => (),
+                Err(_) => return Ok(results),
+            };
+        }
+    }
+
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        loop {
+            match self.parser.eat(stream) {
+                Ok(_) => (),
+                Err(_) => return Ok(()),
+            };
+
+            match self.delimiter.eat(stream) {
+                Ok(result) => (),
+                Err(_) => return Ok(()),
+            };
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -535,10 +619,8 @@ mod test {
 
     #[test]
     fn alt_parses() {
-        let parser = alt(
-            attempt(chunk("Hello".chars().collect())),
-            chunk("Heffo".chars().collect()),
-        );
+        let parser =
+            Alt | attempt(chunk("Hello".chars().collect())) | chunk("Heffo".chars().collect());
 
         let mut string1 = CachedIterator::from("Hello, World!".chars());
         let mut string2 = CachedIterator::from("Heffo, World!".chars());
@@ -555,30 +637,31 @@ mod test {
 
     #[test]
     fn simple_grammar() {
-        let ws_char = alt(alt(single(' '), single('\t')), single('\n'));
+        let ws_char = Alt | single(' ') | single('\t') | single('\n');
 
-        let ws = many0(ws_char);
+        let ws = void(many0(ws_char));
 
-        let digit = single('0')
-            .alt(single('1'))
-            .alt(single('2'))
-            .alt(single('3'))
-            .alt(single('4'))
-            .alt(single('5'))
-            .alt(single('6'))
-            .alt(single('7'))
-            .alt(single('8'))
-            .alt(single('9'));
+        let digit = Alt
+            | single('0')
+            | single('1')
+            | single('2')
+            | single('3')
+            | single('4')
+            | single('5')
+            | single('6')
+            | single('7')
+            | single('8')
+            | single('9');
 
-        let sexp = (single('('), ws, digit, ws, single(')'));
+        let sexp = (single('('), ws.clone(), digit, ws, single(')'));
 
         let mut string1 = Chars::new("(     5    \t  )");
         let mut string2 = Chars::new("Heffo, World!");
 
         let result: Result<_, ()> = sexp.parse(&mut string1);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), ('(', vec![], '5', vec![], ')'));
-        assert_eq!(string1.remove(3), vec![',', ' ', 'W']);
+        assert_eq!(result.unwrap(), ('(', (), '5', (), ')'));
+        assert_eq!(string1.remove(3), vec![]);
 
         let result: Result<_, ()> = sexp.parse(&mut string2);
         assert!(result.is_err());
