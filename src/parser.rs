@@ -2,12 +2,14 @@
 pub mod alternate;
 pub mod error;
 pub mod sequence;
+pub mod map;
 pub mod stream;
 
 use std::collections::HashSet;
 use std::hash::Hash;
 
 pub use alternate::Alt;
+pub use map::{Map, map};
 use error::{ErrItem, ParseError};
 
 type PResult<R = (), E = ()> = Result<R, E>;
@@ -46,7 +48,6 @@ impl<T: Hash + Eq> Monoid for HashSet<T> {
 
 pub trait Parser<S, R = (), E = (), D = (), Err = ()>
 where
-    Self: Sized,
     S: stream::Stream,
     E: error::ParseError<S::Item, S::Slice, D, Err>,
 {
@@ -87,6 +88,30 @@ fn single_hash<T: Eq + Hash>(elem: T) -> HashSet<T> {
 
 /// A parser which never suceeds
 #[derive(Debug, Clone)]
+pub struct Func<F>(F);
+pub fn func<F>(func: F) -> Func<F> {
+    Func(func)
+}
+impl<F, S, R, E, D, Err> Parser<S, R, E, D, Err> for Func<F>
+where
+    F: Fn(&mut S) -> Result<R, E>,
+    Err: Clone,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<R, E> {
+        (self.0)(stream)
+    }
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        match (self.0)(stream) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// A parser which never suceeds
+#[derive(Debug, Clone)]
 pub struct Failure<Err> {
     error: Err,
 }
@@ -122,8 +147,6 @@ impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Label<P, D>
 where
     P: Parser<S, R, E, D, Err>,
     S: stream::Stream,
-    S::Item: Eq + Hash,
-    S::Slice: Eq + Hash,
     D: Eq + Hash + Clone,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
@@ -382,6 +405,35 @@ where
 {
     fn parse(&self, stream: &mut S) -> Result<(), E> {
         self.parser.eat(stream)
+    }
+
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        self.parser.eat(stream)
+    }
+}
+#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
+pub struct Value<P, Rin, Rout> {
+    parser: P,
+    result: Rout,
+    _result: std::marker::PhantomData<*const Rin>,
+}
+pub fn value<P, Rin, Rout>(parser: P, result: Rout) -> Value<P, Rin, Rout> {
+    Value {
+        parser: parser,
+        result: result,
+        _result: std::marker::PhantomData,
+    }
+}
+impl<P, S, Rin, Rout, E, D, Err> Parser<S, Rout, E, D, Err> for Value<P, Rin, Rout>
+where
+    P: Parser<S, Rin, E, D, Err>,
+    Rout: Clone,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    fn parse(&self, stream: &mut S) -> Result<Rout, E> {
+        self.parser.eat(stream)?;
+        Ok(self.result.clone())
     }
 
     fn eat(&self, stream: &mut S) -> Result<(), E> {
