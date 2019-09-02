@@ -9,7 +9,7 @@ pub trait ParseError<T, C, D = (), E = ()>: Monoid {
         unexpected: Option<ErrItem<T, C, D>>,
         expected: HashSet<ErrItem<T, C, D>>,
     ) -> Self;
-    fn label(&mut self, label: D);
+    fn description(&mut self, label: D);
     fn fancy_error(position: SourcePos, error: E) -> Self;
     fn get_position(&self) -> SourcePos;
 }
@@ -106,7 +106,7 @@ where
     ) -> Self {
         FullError::Simple(position, unexpected, expected)
     }
-    fn label(&mut self, label: D) {
+    fn description(&mut self, label: D) {
         match *self {
             FullError::Simple(_, _, ref mut expected) => {
                 *expected = super::single_hash(ErrItem::Description(label));
@@ -136,7 +136,7 @@ impl<T, C> ParseError<T, C, (), ()> for () {
         _expected: HashSet<ErrItem<T, C, ()>>,
     ) -> Self {
     }
-    fn label(&mut self, _label: ()) {}
+    fn description(&mut self, _label: ()) {}
     fn fancy_error(_position: SourcePos, _error: ()) -> Self {}
     fn get_position(&self) -> SourcePos {
         SourcePos(0)
@@ -161,7 +161,7 @@ impl<T, C> ParseError<T, C, (), ()> for SourcePos {
     ) -> Self {
         position
     }
-    fn label(&mut self, _label: ()) {}
+    fn description(&mut self, _label: ()) {}
     fn fancy_error(position: SourcePos, _error: ()) -> Self {
         position
     }

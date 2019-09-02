@@ -1,16 +1,27 @@
 
 pub mod alternate;
 pub mod error;
-pub mod sequence;
+
+pub mod bracketed;
 pub mod map;
+pub mod one_of;
+pub mod sequence;
 pub mod stream;
+pub mod token;
+
+pub use alternate::Alt;
+pub use bracketed::{between, first, second, Between, First, Second};
+pub use map::{map, Map};
+pub use one_of::{one_of, OneOf};
+pub use token::{token, Token};
 
 use std::collections::HashSet;
 use std::hash::Hash;
 
-pub use alternate::Alt;
-pub use map::{Map, map};
+use alternate::Alt2;
 use error::{ErrItem, ParseError};
+use stream::SliceLen;
+
 
 type PResult<R = (), E = ()> = Result<R, E>;
 
@@ -46,13 +57,14 @@ impl<T: Hash + Eq> Monoid for HashSet<T> {
     }
 }
 
-pub trait Parser<S, R = (), E = (), D = (), Err = ()>
+pub trait Parser<S, E = (), D = (), Err = ()>
 where
     S: stream::Stream,
     E: error::ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E>;
-    fn parse_qualified(&self, stream: &mut S, _err: &E) -> PResult<R, E> {
+    type Output;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E>;
+    fn parse_qualified(&self, stream: &mut S, _err: &E) -> PResult<Self::Output, E> {
         self.parse(stream)
     }
 
@@ -61,6 +73,122 @@ where
     }
     fn eat_qualified(&self, stream: &mut S, _err: &E) -> PResult<(), E> {
         self.eat(stream)
+    }
+}
+
+pub trait Combinator
+where
+    Self: Sized,
+{
+    fn label<D>(self, token_description: D) -> Label<Self, D>
+    where
+        Label<Self, D>: Combinator,
+    {
+        Label {
+            parser: self,
+            token_description: token_description,
+        }
+    }
+    fn attempt<R>(self) -> Attempt<Self, R>
+    where
+        Attempt<Self, R>: Combinator,
+    {
+        attempt(self)
+    }
+    fn many(self) -> Many0<Self>
+    where
+        Many0<Self>: Combinator,
+    {
+        Many0(self)
+    }
+    fn many1(self) -> Many1<Self>
+    where
+        Many1<Self>: Combinator,
+    {
+        Many1(self)
+    }
+    fn optional(self) -> Optional<Self>
+    where
+        Optional<Self>: Combinator,
+    {
+        Optional(self)
+    }
+    fn void(self) -> Void<Self>
+    where
+        Void<Self>: Combinator,
+    {
+        Void { parser: self }
+    }
+    fn value<R>(self, value: R) -> Value<Self, R>
+    where
+        Value<Self, R>: Combinator,
+    {
+        Value {
+            parser: self,
+            result: value,
+        }
+    }
+    fn first<P1>(self, other: P1) -> First<Self, P1>
+    where
+        First<Self, P1>: Combinator,
+    {
+        first(self, other)
+    }
+    fn second<P1>(self, other: P1) -> Second<Self, P1>
+    where
+        Second<Self, P1>: Combinator,
+    {
+        second(self, other)
+    }
+    fn sep_by<P1>(self, delimiter: P1) -> SepBy<Self, P1>
+    where
+        SepBy<Self, P1>: Combinator,
+    {
+        SepBy {
+            parser: self,
+            delimiter: delimiter,
+
+        }
+    }
+    fn map<F, R>(self, func: F) -> Map<Self, F, R>
+    where
+        Map<Self, F, R>: Combinator,
+    {
+        map(self, func)
+    }
+    fn alt<P1>(self, other: P1) -> Alt2<Self, P1>
+    where
+        Alt2<Self, P1>: Combinator,
+    {
+        alternate::alt2(self, other)
+    }
+    fn then<P1>(self, other: P1) -> (Self, P1)
+    where
+        (Self, P1): Combinator,
+    {
+        (self, other)
+    }
+    fn between<L, R>(self, left: L, right: R) -> Between<L, Self, R>
+    where
+        Between<L, Self, R>: Combinator,
+    {
+        between(self, left, right)
+    }
+}
+
+impl<'p, P> Combinator for &'p P {}
+impl<'p, P, S, E, D, Err> Parser<S, E, D, Err> for &'p P
+where
+    P: Parser<S, E, D, Err>,
+    S: stream::Stream,
+    E: error::ParseError<S::Item, S::Slice, D, Err>,
+{
+    type Output = P::Output;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
+        (*self).parse(stream)
+    }
+    fn eat(&self, stream: &mut S) -> Result<(), E> {
+        (*self).eat(stream)
     }
 }
 
@@ -88,22 +216,35 @@ fn single_hash<T: Eq + Hash>(elem: T) -> HashSet<T> {
 
 /// A parser which never suceeds
 #[derive(Debug, Clone)]
-pub struct Func<F>(F);
-pub fn func<F>(func: F) -> Func<F> {
-    Func(func)
+pub struct Func<F, R> {
+    func: F,
+    _output: std::marker::PhantomData<*const R>,
 }
-impl<F, S, R, E, D, Err> Parser<S, R, E, D, Err> for Func<F>
+impl<F, R> Combinator for Func<F, R> {}
+pub fn func<F, S, R, E, D, Err>(func: F) -> Func<F, R>
+where
+    F: Fn(&mut S) -> Result<R, E>,
+    S: stream::Stream,
+    E: ParseError<S::Item, S::Slice, D, Err>,
+{
+    Func {
+        func: func,
+        _output: std::marker::PhantomData,
+    }
+}
+impl<F, R, S, E, D, Err> Parser<S, E, D, Err> for Func<F, R>
 where
     F: Fn(&mut S) -> Result<R, E>,
     Err: Clone,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
-        (self.0)(stream)
+    type Output = R;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
+        (self.func)(stream)
     }
     fn eat(&self, stream: &mut S) -> Result<(), E> {
-        match (self.0)(stream) {
+        match (self.func)(stream) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
@@ -115,16 +256,18 @@ where
 pub struct Failure<Err> {
     error: Err,
 }
+impl<Err> Combinator for Failure<Err> {}
 pub fn failure<Err>(error: Err) -> Failure<Err> {
     Failure { error: error }
 }
-impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Failure<Err>
+impl<S, E, D, Err> Parser<S, E, D, Err> for Failure<Err>
 where
     Err: Clone,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
+    type Output = ();
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         Err(E::fancy_error(stream.get_position(), self.error.clone()))
     }
     fn eat(&self, stream: &mut S) -> Result<(), E> {
@@ -137,28 +280,32 @@ pub struct Label<P, D> {
     parser: P,
     token_description: D,
 }
+impl<P, D> Combinator for Label<P, D> {}
 pub fn label<P, D>(parser: P, token_description: D) -> Label<P, D> {
     Label {
         parser: parser,
         token_description: token_description,
     }
 }
-impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Label<P, D>
+impl<P, S, E, D, Err> Parser<S, E, D, Err> for Label<P, D>
 where
-    P: Parser<S, R, E, D, Err>,
+    P: Parser<S, E, D, Err>,
     S: stream::Stream,
     D: Eq + Hash + Clone,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
-        self.parser.parse(stream).map_err(|mut err| {
-            err.label(self.token_description.clone());
+    type Output = P::Output;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
+        self.parser.parse(stream).map_err(|mut err: E| {
+            let desc: D = self.token_description.clone();
+            err.description(desc);
             err
         })
     }
     fn eat(&self, stream: &mut S) -> Result<(), E> {
         self.parser.eat(stream).map_err(|mut err| {
-            err.label(self.token_description.clone());
+            let desc: D = self.token_description.clone();
+            err.description(desc);
             err
         })
     }
@@ -169,18 +316,20 @@ where
 /// consume it's input if it fails.
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Char<T>(T);
+impl<T> Combinator for Char<T> {}
 pub fn single<T>(token: T) -> Char<T> {
     Char(token)
 }
-impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Char<R>
+impl<S, E, D, Err> Parser<S, E, D, Err> for Char<S::Item>
 where
-    S: stream::Stream<Item = R>,
+    S: stream::Stream,
     S::Slice: Eq + Hash,
-    R: Eq + Hash + Clone,
+    S::Item: Eq + Hash + Clone,
     E: ParseError<S::Item, S::Slice, D, Err>,
     D: Eq + Hash,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
+    type Output = S::Item;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         if let Some(token) = stream.peek() {
             if token == self.0 {
                 stream.advance();
@@ -222,18 +371,20 @@ where
 /// Parse a "chunk" of input. As this is a basic parser, it will not consume any
 /// of the stream if it fails.
 pub struct Chunk<C>(C);
+impl<C> Combinator for Chunk<C> {}
 pub fn chunk<C>(chunk: C) -> Chunk<C> {
     Chunk(chunk)
 }
-impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for Chunk<R>
+impl<S, E, D, Err> Parser<S, E, D, Err> for Chunk<S::Slice>
 where
-    S: stream::Stream<Slice = R>,
+    S: stream::Stream,
     S::Item: Eq + Hash,
-    R: Clone + Eq + Hash + PartialEq + stream::SliceLen,
+    S::Slice: Clone + Eq + Hash + PartialEq + stream::SliceLen,
     E: ParseError<S::Item, S::Slice, D, Err>,
     D: Eq + Hash,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
+    type Output = S::Slice;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         let len = self.0.length();
         let pos = stream.get_position();
         stream.lookahead(len).map_or_else(
@@ -281,40 +432,50 @@ where
 /// An `Attempt` will try to apply a parser to a strem. If it succeeds, it will
 /// consume input, if it fails, it will pretend that it consumed no imput.
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Attempt<P>(P);
-pub fn attempt<P>(parser: P) -> Attempt<P> {
-    Attempt(parser)
+pub struct Attempt<P, R> {
+    parser: P,
+    _result: std::marker::PhantomData<*const R>,
 }
-impl<P, S, R, E, D, Err> Parser<S, R, E, D, Err> for Attempt<P>
+impl<P, R> Combinator for Attempt<P, R> {}
+pub fn attempt<P, R>(parser: P) -> Attempt<P, R> {
+    Attempt {
+        parser: parser,
+        _result: std::marker::PhantomData,
+    }
+}
+impl<P, R, S, E, D, Err> Parser<S, E, D, Err> for Attempt<P, R>
 where
     S: stream::Stream,
-    P: for<'a> Parser<stream::Conjecture<'a, S>, R, E, D, Err>,
+    P: for<'a> Parser<stream::Conjecture<'a, S>, E, D, Err, Output = R>,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
-        stream.conjecture(|conj| self.0.parse(conj))
+    type Output = R;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
+        stream.conjecture(|conj| self.parser.parse(conj))
     }
 
     fn eat(&self, stream: &mut S) -> Result<(), E> {
-        stream.conjecture(|conj| self.0.eat(conj))
+        stream.conjecture(|conj| self.parser.eat(conj))
     }
 }
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Many0<P>(P);
+impl<P> Combinator for Many0<P> {}
 pub fn many0<P>(parser: P) -> Many0<P> {
     Many0(parser)
 }
 pub fn many<P>(parser: P) -> Many0<P> {
     Many0(parser)
 }
-impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many0<P>
+impl<P, S, E, D, Err> Parser<S, E, D, Err> for Many0<P>
 where
-    P: Parser<S, R, E, D, Err>,
+    P: Parser<S, E, D, Err>,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<Vec<R>, E> {
+    type Output = Vec<P::Output>;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         let mut results = Vec::new();
         loop {
             match self.0.parse(stream) {
@@ -336,13 +497,15 @@ where
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Many1<P>(P);
-impl<P, S, R, E, D, Err> Parser<S, Vec<R>, E, D, Err> for Many1<P>
+impl<P> Combinator for Many1<P> {}
+impl<P, S, E, D, Err> Parser<S, E, D, Err> for Many1<P>
 where
-    P: Parser<S, R, E, D, Err>,
+    P: Parser<S, E, D, Err>,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<Vec<R>, E> {
+    type Output = Vec<P::Output>;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         let mut results = vec![self.0.parse(stream)?];
         loop {
             match self.0.parse(stream) {
@@ -365,13 +528,15 @@ where
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Optional<P>(P);
-impl<P, S, R, E, D, Err> Parser<S, Option<R>, E, D, Err> for Optional<P>
+impl<P> Combinator for Optional<P> {}
+impl<P, S, E, D, Err> Parser<S, E, D, Err> for Optional<P>
 where
-    P: Parser<S, R, E, D, Err>,
+    P: Parser<S, E, D, Err>,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<Option<R>, E> {
+    type Output = Option<P::Output>;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         match self.0.parse(stream) {
             Ok(result) => Ok(Some(result)),
             Err(_) => Ok(None),
@@ -387,22 +552,20 @@ where
 }
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Void<P, R> {
+pub struct Void<P> {
     parser: P,
-    _result: std::marker::PhantomData<*const R>,
 }
-pub fn void<P, R>(parser: P) -> Void<P, R> {
-    Void {
-        parser: parser,
-        _result: std::marker::PhantomData,
-    }
+impl<P> Combinator for Void<P> {}
+pub fn void<P>(parser: P) -> Void<P> {
+    Void { parser: parser }
 }
-impl<P, S, R, E, D, Err> Parser<S, (), E, D, Err> for Void<P, R>
+impl<P, S, E, D, Err> Parser<S, E, D, Err> for Void<P>
 where
-    P: Parser<S, R, E, D, Err>,
+    P: Parser<S, E, D, Err>,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
+    type Output = ();
     fn parse(&self, stream: &mut S) -> Result<(), E> {
         self.parser.eat(stream)
     }
@@ -411,27 +574,29 @@ where
         self.parser.eat(stream)
     }
 }
+
+
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Value<P, Rin, Rout> {
+pub struct Value<P, R> {
     parser: P,
-    result: Rout,
-    _result: std::marker::PhantomData<*const Rin>,
+    result: R,
 }
-pub fn value<P, Rin, Rout>(parser: P, result: Rout) -> Value<P, Rin, Rout> {
+impl<P, R> Combinator for Value<P, R> {}
+pub fn value<P, R>(parser: P, result: R) -> Value<P, R> {
     Value {
         parser: parser,
         result: result,
-        _result: std::marker::PhantomData,
     }
 }
-impl<P, S, Rin, Rout, E, D, Err> Parser<S, Rout, E, D, Err> for Value<P, Rin, Rout>
+impl<P, S, R, E, D, Err> Parser<S, E, D, Err> for Value<P, R>
 where
-    P: Parser<S, Rin, E, D, Err>,
-    Rout: Clone,
+    P: Parser<S, E, D, Err>,
+    R: Clone,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<Rout, E> {
+    type Output = R;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         self.parser.eat(stream)?;
         Ok(self.result.clone())
     }
@@ -441,77 +606,13 @@ where
     }
 }
 
-#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct First<P0, P1, R1> {
-    first: P0,
-    second: P1,
-    _second_result: std::marker::PhantomData<*const R1>,
-}
-pub fn first<P0, P1, R1>(first: P0, second: P1) -> First<P0, P1, R1> {
-    First {
-        first: first,
-        second: second,
-        _second_result: std::marker::PhantomData,
-    }
-}
-impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, R0, E, D, Err> for First<P0, P1, R1>
-where
-    P0: Parser<S, R0, E, D, Err>,
-    P1: Parser<S, R1, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    fn parse(&self, stream: &mut S) -> Result<R0, E> {
-        let result = self.first.parse(stream)?;
-        self.second.eat(stream)?;
-        Ok(result)
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        self.first.eat(stream)?;
-        self.second.eat(stream)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Second<P0, P1, R0> {
-    first: P0,
-    second: P1,
-    _first_result: std::marker::PhantomData<*const R0>,
-}
-pub fn second<P0, P1, R0>(first: P0, second: P1) -> Second<P0, P1, R0> {
-    Second {
-        first: first,
-        second: second,
-        _first_result: std::marker::PhantomData,
-    }
-}
-impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, R1, E, D, Err> for Second<P0, P1, R0>
-where
-    P0: Parser<S, R0, E, D, Err>,
-    P1: Parser<S, R1, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    fn parse(&self, stream: &mut S) -> Result<R1, E> {
-        self.first.eat(stream)?;
-        self.second.parse(stream)
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        self.first.eat(stream)?;
-        self.second.eat(stream)?;
-        Ok(())
-    }
-}
-
-impl<S, R, E, D, Err> Parser<S, R, E, D, Err> for fn(&mut S) -> Result<R, E>
+impl<S, R, E, D, Err> Parser<S, E, D, Err> for fn(&mut S) -> Result<R, E>
 where
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<R, E> {
+    type Output = R;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         self(stream)
     }
     fn eat(&self, stream: &mut S) -> Result<(), E> {
@@ -523,26 +624,26 @@ where
 }
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct SepBy<P0, P1, R> {
+pub struct SepBy<P0, P1> {
     parser: P0,
     delimiter: P1,
-    _delimiter_result: std::marker::PhantomData<*const R>,
 }
-pub fn sep_by<P0, P1, R>(parser: P0, delimiter: P1) -> SepBy<P0, P1, R> {
+impl<P0, P1> Combinator for SepBy<P0, P1> {}
+pub fn sep_by<P0, P1>(parser: P0, delimiter: P1) -> SepBy<P0, P1> {
     SepBy {
         parser: parser,
         delimiter: delimiter,
-        _delimiter_result: std::marker::PhantomData,
     }
 }
-impl<P0, P1, S, R0, R1, E, D, Err> Parser<S, Vec<R0>, E, D, Err> for SepBy<P0, P1, R1>
+impl<P0, P1, S, E, D, Err> Parser<S, E, D, Err> for SepBy<P0, P1>
 where
-    P0: Parser<S, R0, E, D, Err>,
-    P1: Parser<S, R1, E, D, Err>,
+    P0: Parser<S, E, D, Err>,
+    P1: Parser<S, E, D, Err>,
     S: stream::Stream,
     E: ParseError<S::Item, S::Slice, D, Err>,
 {
-    fn parse(&self, stream: &mut S) -> Result<Vec<R0>, E> {
+    type Output = Vec<P0::Output>;
+    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
         let mut results = Vec::new();
         loop {
             match self.parser.parse(stream) {
@@ -565,7 +666,7 @@ where
             };
 
             match self.delimiter.eat(stream) {
-                Ok(result) => (),
+                Ok(_result) => (),
                 Err(_) => return Ok(()),
             };
         }
@@ -574,10 +675,10 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use error::{FullError, SourcePos};
-    use stream::{CachedIterator, Chars, Stream};
 
+    use super::error::{FullError, SourcePos};
+    use super::stream::{CachedIterator, Chars, Stream};
+    use super::*;
     #[test]
     fn char_parses() {
         let parser = single('H');
@@ -718,5 +819,93 @@ mod test {
         let result: Result<_, ()> = sexp.parse(&mut string2);
         assert!(result.is_err());
         assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
+    }
+
+    use std::collections::{HashMap, HashSet};
+    #[derive(Debug, Clone, PartialEq)]
+    enum JSON {
+        JObject(HashMap<String, JSON>),
+        JArray(Vec<JSON>),
+        JString(String),
+        JNumber(f64),
+        JBool(bool),
+        JNull,
+    }
+
+    fn parse_json<S, E>(stream: &mut S) -> Result<JSON, E>
+    where
+        S: stream::Stream<Item = char, Slice = &'static str>,
+        E: error::ParseError<S::Item, S::Slice, (), ()>,
+    {
+        let ws = many(Alt | single(' ') | single('\n') | single('\t') | single('\r')).void();
+
+        let null_p = chunk("null").value(JSON::JNull);
+        let true_p = chunk("true").value(JSON::JBool(true));
+        let false_p = chunk("false").value(JSON::JBool(false));
+
+        let normal_char = token(HashSet::new(), |c| {
+            *c >= ' ' && *c <= '\u{10FFF}' && *c != '\"' && *c != '\\'
+        });
+        let escaped = single('\\')
+            .second(one_of(&['\"', '\\', '/', 'b', 'f', 'n', 'r', 't']))
+            .map(|c| match c {
+                'b' => '\x08',
+                'f' => '\x0F',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                any_c => any_c,
+            });
+        let character = Alt | normal_char | escaped;
+
+        let raw_string = many(character)
+            .between(single('"'), single('"'))
+            .map(|chars: Vec<_>| chars.into_iter().collect());
+
+        let string_p = (&raw_string).map(JSON::JString);
+
+        let array_p = func(parse_json)
+            .sep_by(single(','))
+            .between(single('['), single(']'))
+            .map(JSON::JArray);
+
+        let object_key = (&raw_string).between(&ws, (&ws, single(':')));
+
+        let object_entry = (object_key, func(parse_json));
+
+        let object_p = object_entry
+            .sep_by(single(','))
+            .between(single('{'), single('}'))
+            .map(|entries: Vec<(String, JSON)>| JSON::JObject(entries.into_iter().collect()));
+
+        let value = Alt | null_p | true_p | false_p | string_p | array_p | object_p;
+
+        value.between(&ws, &ws).parse(stream)
+    }
+
+    #[test]
+    fn more_complex_grammar() {
+        let result: Result<_, ()> = Ok(JSON::JBool(false));
+        assert_eq!(parse_json(&mut Chars::new("false")), result);
+
+        let result: Result<_, ()> = Ok(JSON::JBool(true));
+        assert_eq!(parse_json(&mut Chars::new("true")), result);
+
+        let result: Result<_, ()> = Ok(JSON::JNull);
+        assert_eq!(parse_json(&mut Chars::new("null")), result);
+
+        let result: Result<_, ()> = Ok(JSON::JString("Hello, World!".to_string()));
+        assert_eq!(parse_json(&mut Chars::new("\"Hello, World!\"")), result);
+
+        let result: Result<_, ()> = Ok(JSON::JArray(vec![
+            JSON::JNull,
+            JSON::JBool(true),
+            JSON::JBool(false),
+            JSON::JString("Hello".to_string()),
+        ]));
+        assert_eq!(
+            parse_json(&mut Chars::new("[ null, true, false, \t\n \"Hello\"   ]")),
+            result
+        );
     }
 }

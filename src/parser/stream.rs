@@ -362,19 +362,27 @@ impl<'a> Stream for Chars<'a> {
         let string = self.string.as_str();
         let mut indices = string.char_indices();
         let lower_byte = indices.nth(lower);
-        let upper_byte = indices.nth(upper - lower - 1);
+        let upper_byte = if upper > lower + 1 {
+            indices.nth(upper - lower - 2)
+        }
+        else {
+            lower_byte
+        };
 
         match (lower_byte, upper_byte) {
-            (Some(lb), Some(ub)) => Some(&string[lb.0..ub.0]),
+            (Some(lb), Some(ub)) => Some(&string[lb.0..=ub.0]),
             _ => None,
         }
     }
     fn lookahead(&mut self, n: usize) -> Option<Self::Slice> {
+        if n == 0 {
+            return Some("");
+        }
         let string = self.string.as_str();
-        let index = string.char_indices().nth(n);
+        let index = string.char_indices().nth(n - 1);
 
         match index {
-            Some(ix) => Some(&string[..ix.0]),
+            Some(ix) => Some(&string[..=ix.0]),
             _ => None,
         }
     }
@@ -433,6 +441,10 @@ mod tests {
         assert_eq!(zero_slice, Some(""));
         assert_eq!(zero_slice.unwrap().length(), 0);
 
+        let zero_slice = stream.lookahead(0);
+        assert_eq!(zero_slice, Some(""));
+        assert_eq!(zero_slice.unwrap().length(), 0);
+
         let mut stream = Slice::new(&[1, 2, 3, 4, 5, 6, 7]);
         let zero_slice = stream.view(5, 5);
         assert_eq!(zero_slice, Some(&[][..]));
@@ -455,6 +467,10 @@ mod tests {
     #[test]
     fn char_stream() {
         let mut stream = Chars::new("Hello, World!");
+
+        let slice = stream.lookahead(5);
+        assert_eq!(slice.unwrap().length(), 5);
+
 
         let slice = stream.view(3, 8);
         assert_eq!(slice, Some("lo, W"));

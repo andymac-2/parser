@@ -1,4 +1,4 @@
-use super::{error, stream, Parser};
+use super::{error, stream, Parser, Combinator};
 
 macro_rules! parse_multi {
     ( $this:ident $stream:ident; $($parser:ident $result:ident),* ) => {
@@ -26,17 +26,19 @@ macro_rules! eat_multi {
 
 macro_rules! impl_multi {
     ( $($parser_t:ident, $result_t:ident, $parser:ident, $result:ident);* ) => {
-        impl < $( $parser_t , )* $( $result_t , )* S, E, D, Err>
-            Parser <S, ( $($result_t, )* ), E, D, Err>
+        impl< $( $parser_t , )* > Combinator for ( $($parser_t, )* ) {}
+        impl < $( $parser_t , )* S, E, D, Err>
+            Parser <S, E, D, Err>
             for ( $($parser_t, )* )
         where
             S: stream::Stream,
             E: error::ParseError<S::Item, S::Slice, D, Err>,
             $(
-                $parser_t: Parser<S, $result_t, E, D, Err>,
+                $parser_t: Parser<S, E, D, Err>,
             )*
         {
-            fn parse(&self, stream: &mut S) -> Result<( $($result_t, )* ), E> {
+            type Output = ( $($parser_t::Output, )* );
+            fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
                 parse_multi!(self stream; $($parser $result),* )
             }
             fn eat(&self, stream: &mut S) -> Result<(), E> {
@@ -46,11 +48,12 @@ macro_rules! impl_multi {
     }
 }
 
-impl<S, E, D, Err> Parser<S, (), E, D, Err> for ()
+impl<S, E, D, Err> Parser<S, E, D, Err> for ()
 where
     S: stream::Stream,
     E: error::ParseError<S::Item, S::Slice, D, Err>,
 {
+    type Output = ();
     fn parse(&self, _stream: &mut S) -> Result<(), E> {
         Ok(())
     }
