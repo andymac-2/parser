@@ -30,8 +30,17 @@ where
 {
     Token {
         func: func,
-        expected: expected,
+        expected: expected
     }
+}
+pub fn satisfy<F, T, C, D>(func: F) -> Token<F, T, C, D> 
+where
+    T: Eq + hash::Hash,
+    C: Eq + hash::Hash,
+    D: Eq + hash::Hash,
+    F: Fn(&T) -> bool
+{
+    token(HashSet::new(), func)
 }
 impl<F, S, E, D, Err> Parser<S, E, D, Err> for Token<F, S::Item, S::Slice, D>
 where

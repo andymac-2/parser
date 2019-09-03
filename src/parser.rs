@@ -1,9 +1,9 @@
 
 pub mod alternate;
-pub mod error;
-
 pub mod bracketed;
+pub mod error;
 pub mod map;
+pub mod multi;
 pub mod one_of;
 pub mod sequence;
 pub mod stream;
@@ -12,8 +12,9 @@ pub mod token;
 pub use alternate::Alt;
 pub use bracketed::{between, first, second, Between, First, Second};
 pub use map::{map, Map};
+pub use multi::{count, many, many1, sep_by, Count, Many0, Many1, SepBy};
 pub use one_of::{one_of, OneOf};
-pub use token::{token, Token};
+pub use token::{satisfy, token, Token};
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -99,13 +100,19 @@ where
     where
         Many0<Self>: Combinator,
     {
-        Many0(self)
+        many(self)
     }
     fn many1(self) -> Many1<Self>
     where
         Many1<Self>: Combinator,
     {
-        Many1(self)
+        many1(self)
+    }
+    fn count(self, num: usize) -> Count<Self>
+    where
+        Count<Self>: Combinator,
+    {
+        count(self, num)
     }
     fn optional(self) -> Optional<Self>
     where
@@ -130,25 +137,24 @@ where
     }
     fn first<P1>(self, other: P1) -> First<Self, P1>
     where
+        P1: Combinator,
         First<Self, P1>: Combinator,
     {
         first(self, other)
     }
-    fn second<P1>(self, other: P1) -> Second<Self, P1>
+    fn second<P1: Combinator>(self, other: P1) -> Second<Self, P1>
     where
+        P1: Combinator,
         Second<Self, P1>: Combinator,
     {
         second(self, other)
     }
     fn sep_by<P1>(self, delimiter: P1) -> SepBy<Self, P1>
     where
+        P1: Combinator,
         SepBy<Self, P1>: Combinator,
     {
-        SepBy {
-            parser: self,
-            delimiter: delimiter,
-
-        }
+        sep_by(self, delimiter)
     }
     fn map<F, R>(self, func: F) -> Map<Self, F, R>
     where
@@ -158,18 +164,22 @@ where
     }
     fn alt<P1>(self, other: P1) -> Alt2<Self, P1>
     where
+        P1: Combinator,
         Alt2<Self, P1>: Combinator,
     {
         alternate::alt2(self, other)
     }
     fn then<P1>(self, other: P1) -> (Self, P1)
     where
+        P1: Combinator,
         (Self, P1): Combinator,
     {
         (self, other)
     }
     fn between<L, R>(self, left: L, right: R) -> Between<L, Self, R>
     where
+        L: Combinator,
+        R: Combinator,
         Between<L, Self, R>: Combinator,
     {
         between(self, left, right)
@@ -460,73 +470,6 @@ where
 }
 
 #[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Many0<P>(P);
-impl<P> Combinator for Many0<P> {}
-pub fn many0<P>(parser: P) -> Many0<P> {
-    Many0(parser)
-}
-pub fn many<P>(parser: P) -> Many0<P> {
-    Many0(parser)
-}
-impl<P, S, E, D, Err> Parser<S, E, D, Err> for Many0<P>
-where
-    P: Parser<S, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    type Output = Vec<P::Output>;
-    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
-        let mut results = Vec::new();
-        loop {
-            match self.0.parse(stream) {
-                Ok(result) => results.push(result),
-                Err(_) => return Ok(results),
-            };
-        }
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        loop {
-            match self.0.parse(stream) {
-                Ok(_) => (),
-                Err(_) => return Ok(()),
-            };
-        }
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Many1<P>(P);
-impl<P> Combinator for Many1<P> {}
-impl<P, S, E, D, Err> Parser<S, E, D, Err> for Many1<P>
-where
-    P: Parser<S, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    type Output = Vec<P::Output>;
-    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
-        let mut results = vec![self.0.parse(stream)?];
-        loop {
-            match self.0.parse(stream) {
-                Ok(result) => results.push(result),
-                Err(_) => return Ok(results),
-            };
-        }
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        self.0.parse(stream)?;
-        loop {
-            match self.0.parse(stream) {
-                Ok(_) => (),
-                Err(_) => return Ok(()),
-            };
-        }
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Optional<P>(P);
 impl<P> Combinator for Optional<P> {}
 impl<P, S, E, D, Err> Parser<S, E, D, Err> for Optional<P>
@@ -619,56 +562,6 @@ where
         match self(stream) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Hash, Eq, Ord, PartialOrd, PartialEq)]
-pub struct SepBy<P0, P1> {
-    parser: P0,
-    delimiter: P1,
-}
-impl<P0, P1> Combinator for SepBy<P0, P1> {}
-pub fn sep_by<P0, P1>(parser: P0, delimiter: P1) -> SepBy<P0, P1> {
-    SepBy {
-        parser: parser,
-        delimiter: delimiter,
-    }
-}
-impl<P0, P1, S, E, D, Err> Parser<S, E, D, Err> for SepBy<P0, P1>
-where
-    P0: Parser<S, E, D, Err>,
-    P1: Parser<S, E, D, Err>,
-    S: stream::Stream,
-    E: ParseError<S::Item, S::Slice, D, Err>,
-{
-    type Output = Vec<P0::Output>;
-    fn parse(&self, stream: &mut S) -> Result<Self::Output, E> {
-        let mut results = Vec::new();
-        loop {
-            match self.parser.parse(stream) {
-                Ok(result) => results.push(result),
-                Err(_) => return Ok(results),
-            };
-
-            match self.delimiter.eat(stream) {
-                Ok(_) => (),
-                Err(_) => return Ok(results),
-            };
-        }
-    }
-
-    fn eat(&self, stream: &mut S) -> Result<(), E> {
-        loop {
-            match self.parser.eat(stream) {
-                Ok(_) => (),
-                Err(_) => return Ok(()),
-            };
-
-            match self.delimiter.eat(stream) {
-                Ok(_result) => (),
-                Err(_) => return Ok(()),
-            };
         }
     }
 }
@@ -792,7 +685,7 @@ mod test {
     fn simple_grammar() {
         let ws_char = Alt | single(' ') | single('\t') | single('\n');
 
-        let ws = void(many0(ws_char));
+        let ws = many(ws_char).void();
 
         let digit = Alt
             | single('0')
@@ -821,7 +714,7 @@ mod test {
         assert_eq!(string2.remove(3), vec!['H', 'e', 'f']);
     }
 
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     #[derive(Debug, Clone, PartialEq)]
     enum JSON {
         JObject(HashMap<String, JSON>),
@@ -843,25 +736,36 @@ mod test {
         let true_p = chunk("true").value(JSON::JBool(true));
         let false_p = chunk("false").value(JSON::JBool(false));
 
-        let normal_char = token(HashSet::new(), |c| {
-            *c >= ' ' && *c <= '\u{10FFF}' && *c != '\"' && *c != '\\'
-        });
-        let escaped = single('\\')
-            .second(one_of(&['\"', '\\', '/', 'b', 'f', 'n', 'r', 't']))
-            .map(|c| match c {
-                'b' => '\x08',
-                'f' => '\x0F',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                any_c => any_c,
+        let normal_char = satisfy(|c| *c >= ' ' && *c <= '\u{10FFF}' && *c != '\"' && *c != '\\');
+        let unicode = single('u')
+            .second(satisfy(|c: &char| c.is_ascii_hexdigit()).count(4))
+            .map(|chars: Vec<char>| {
+                if let &[a, b, c, d] = chars.as_slice() {
+                    std::char::from_u32(
+                        a.to_digit(16).expect("Hex digit") * 0x1000
+                            + b.to_digit(16).expect("Hex digit") * 0x0100
+                            + c.to_digit(16).expect("Hex digit") * 0x0010
+                            + d.to_digit(16).expect("Hex digit") * 0x0001,
+                    )
+                    .expect("Valid char")
+                } else {
+                    unreachable!()
+                }
             });
+        let escape_char = one_of(&['\"', '\\', '/', 'b', 'f', 'n', 'r', 't']).map(|c| match c {
+            'b' => '\x08',
+            'f' => '\x0F',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            any_c => any_c,
+        });
+        let escaped = single('\\').second(escape_char.alt(unicode));
         let character = Alt | normal_char | escaped;
 
         let raw_string = many(character)
             .between(single('"'), single('"'))
             .map(|chars: Vec<_>| chars.into_iter().collect());
-
         let string_p = (&raw_string).map(JSON::JString);
 
         let array_p = func(parse_json)
